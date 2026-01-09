@@ -1,0 +1,210 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import csv
+import os
+import re
+import matplotlib.pyplot as plt
+
+
+# ============================
+#   REGEX & PARSING TCPDUMP
+# ============================
+
+regex_ligne_ip = re.compile( r'^(?P<time>\d{2}:\d{2}:\d{2}\.\d+)\s+IP\s+' r'(?P<src>[^ ]+)\s+>\s+(?P<dst>[^:]+):\s+' r'Flags\s+ \[(?P<flags>[^\] ]+)\] ,\s+' r'seq\s+(?P<seq>[0-9:]+),\s+' r'ack\s+(?P<ack>\d+),\s+' r'win\s+(?P<win>\d+),.*?' r'length\s+(?P<length>\d+)' )
+
+
+def split_ip_port(value: str):
+    if "." not in value:
+        return value, ""
+    host, port = value.rsplit(".", 1)
+    return host, port
+
+
+def parse_ligne_ip(ligne: str):
+    m = regex_ligne_ip.match(ligne.strip())
+    if not m:
+        return None
+
+    d = m.groupdict()
+
+    src_ip, src_port = split_ip_port(d["src"])
+    dst_ip, dst_port = split_ip_port(d["dst"])
+
+    return {
+        "time": d["time"],
+        "src_ip": src_ip,
+        "src_port": src_port,
+        "dst_ip": dst_ip,
+        "dst_port": dst_port,
+        "flags": d["flags"],
+        "seq": d["seq"],
+        "ack": d["ack"],
+        "win": d["win"],
+        "length": d["length"],
+    }
+
+
+# ============================
+#   ANALYSE DDoS + MARKDOWN
+# ============================
+
+def analyse_ddos(stats, chemin_md):
+    total = stats["total"]
+    syn = stats["syn"]
+
+    top_src_ip, top_src_count = max(stats["src_count"].items(), key=lambda x: x[1], default=("N/A", 0))
+    top_dst_ip, top_dst_count = max(stats["dst_count"].items(), key=lambda x: x[1], default=("N/A", 0))
+
+    syn_ratio = syn / total if total else 0
+
+    ddos_detected = (
+        top_src_count > 500 or
+        syn_ratio > 0.7 or
+        top_dst_count > 1000
+    )
+
+    with open(chemin_md, "w", encoding="utf-8") as f:
+        f.write("# Rapport d'analyse anti-DDoS\n\n")
+
+        if not ddos_detected:
+            f.write("## Résumé\nAucune attaque DDoS détectée.\n")
+            return
+
+        f.write("## Résumé\n⚠️ **Suspicion d'attaque DDoS**\n\n")
+        f.write("## Détails\n")
+        f.write(f"- IP source la plus active : {top_src_ip} ({top_src_count} paquets)\n")
+        f.write(f"- Pourcentage de SYN : {syn_ratio*100:.1f}%\n")
+        f.write(f"- Destination la plus ciblée : {top_dst_ip} ({top_dst_count} paquets)\n")
+
+
+# ============================
+#   GRAPHIQUE MATPLOTLIB
+# ============================
+
+def generer_graphique(stats, chemin_png):
+    top_src = sorted(stats["src_count"].items(), key=lambda x: x[1], reverse=True)[:10]
+
+    if not top_src:
+        return
+
+    ips = [ip for ip, count in top_src]
+    counts = [count for ip, count in top_src]
+
+    plt.figure(figsize=(10, 5))
+    plt.bar(ips, counts, color="steelblue")
+    plt.xticks(rotation=45, ha="right")
+    plt.title("Top 10 IP sources par nombre de paquets")
+    plt.xlabel("IP source")
+    plt.ylabel("Nombre de paquets")
+    plt.tight_layout()
+    plt.savefig(chemin_png)
+    plt.close()
+
+
+# ============================
+#   ANALYSE + CSV
+# ============================
+
+def analyser_fichier_trame(chemin_entree, chemin_csv, chemin_md, chemin_png):
+
+    stats = {
+        "total": 0,
+        "syn": 0,
+        "src_count": {},
+        "dst_count": {}
+    }
+
+    with open(chemin_entree, "r", encoding="utf-8") as f_in, \
+         open(chemin_csv, "w", newline="", encoding="utf-8") as f_out:
+
+        writer = csv.writer(f_out)
+        writer.writerow([
+            "time", "src_ip", "src_port",
+            "dst_ip", "dst_port",
+            "flags", "seq", "ack", "win",
+            "length"
+        ])
+
+        for ligne in f_in:
+            parsed = parse_ligne_ip(ligne)
+            if not parsed:
+                continue
+
+            writer.writerow([
+                parsed["time"],
+                parsed["src_ip"],
+                parsed["src_port"],
+                parsed["dst_ip"],
+                parsed["dst_port"],
+                parsed["flags"],
+                parsed["seq"],
+                parsed["ack"],
+                parsed["win"],
+                parsed["length"],
+            ])
+
+            stats["total"] += 1
+            stats["src_count"][parsed["src_ip"]] = stats["src_count"].get(parsed["src_ip"], 0) + 1
+            stats["dst_count"][parsed["dst_ip"]] = stats["dst_count"].get(parsed["dst_ip"], 0) + 1
+            if "S" in parsed["flags"]:
+                stats["syn"] += 1
+
+    analyse_ddos(stats, chemin_md)
+    generer_graphique(stats, chemin_png)
+
+
+# ============================
+#   INTERFACE TKINTER
+# ============================
+
+def choisir_fichier():
+    chemin_fichier = filedialog.askopenfilename(
+        title="Sélectionner un fichier de trames",
+        filetypes=[("Fichiers texte", "*.txt *.log *.out"), ("Tous les fichiers", "*.*")]
+    )
+
+    if not chemin_fichier:
+        label_chemin.config(text="Aucun fichier sélectionné")
+        return
+
+    label_chemin.config(text=f"Fichier sélectionné : {chemin_fichier}")
+
+    try:
+        dossier, nom = os.path.split(chemin_fichier)
+        nom_sans_ext, _ = os.path.splitext(nom)
+
+        chemin_csv = os.path.join(dossier, nom_sans_ext + "_analyse.csv")
+        chemin_md = os.path.join(dossier, nom_sans_ext + "_rapport.md")
+        chemin_png = os.path.join(dossier, nom_sans_ext + "_graphique.png")
+
+        analyser_fichier_trame(chemin_fichier, chemin_csv, chemin_md, chemin_png)
+
+        messagebox.showinfo(
+            "Terminé",
+            f"CSV créé : {chemin_csv}\n\n"
+            f"Rapport Markdown : {chemin_md}\n\n"
+            f"Graphique : {chemin_png}"
+        )
+
+    except Exception as e:
+        messagebox.showerror("Erreur", f"Problème lors de l'analyse : {e}")
+
+
+def quitter():
+    fenetre.destroy()
+
+
+fenetre = tk.Tk()
+fenetre.title("Analyse de trames TCPDump")
+fenetre.geometry("500x220")
+
+btn_choisir_fichier = tk.Button(fenetre, text="Choisir un fichier", command=choisir_fichier)
+btn_choisir_fichier.pack(pady=20)
+
+label_chemin = tk.Label(fenetre, text="Aucun fichier sélectionné", wraplength=460)
+label_chemin.pack(pady=20)
+
+btn_quitter = tk.Button(fenetre, text="Quitter", command=quitter)
+btn_quitter.pack(pady=20)
+
+fenetre.mainloop()

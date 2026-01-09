@@ -1,0 +1,404 @@
+import re
+import csv
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from collections import Counter, defaultdict
+
+import matplotlib
+matplotlib.use("Agg")  # backend sans affichage
+import matplotlib.pyplot as plt
+
+
+# ================== PARSING DES LIGNES TCPDUMP ===================
+
+REGEX_LIGNE_IP = re.compile(
+    r'^(?P<time>\d{2}:\d{2}:\d{2}\.\d+)\s+IP\s+'
+    r'(?P<src>[^ ]+)\s+>\s+(?P<dst>[^:]+):\s+'
+    r'Flags\s+\[(?P<flags>[^\]]+)\],\s+'
+    r'(?:seq\s+(?P<seq>[0-9:]+),\s+)?'
+    r'(?:ack\s+(?P<ack>\d+),\s+)?'
+    r'win\s+(?P<win>\d+).*?'
+    r'length\s+(?P<length>\d+)'
+)
+
+
+def split_ip_port(host_port: str):
+    if '.' not in host_port:
+        return host_port, ''
+    h, p = host_port.rsplit('.', 1)
+    return h, p
+
+
+def parse_ligne_tcpdump(ligne: str):
+    m = REGEX_LIGNE_IP.match(ligne.strip())
+    if not m:
+        return None
+
+    time = m.group('time')
+    src_raw = m.group('src')
+    dst_raw = m.group('dst')
+    flags = m.group('flags')
+    seq = m.group('seq') or ''
+    ack = m.group('ack') or ''
+    win = m.group('win')
+    length = m.group('length')
+
+    src_ip, src_port = split_ip_port(src_raw)
+    dst_ip, dst_port = split_ip_port(dst_raw)
+
+    return {
+        'time': time,
+        'src_ip': src_ip,
+        'src_port': src_port,
+        'dst_ip': dst_ip,
+        'dst_port': dst_port,
+        'flags': flags,
+        'seq': seq,
+        'ack': ack,
+        'win': win,
+        'length': length,
+    }
+
+
+def tcpdump_to_csv(fichier_tcpdump: str):
+    base, _ = os.path.splitext(fichier_tcpdump)
+    fichier_csv = base + "_analyse.csv"
+
+    with open(fichier_tcpdump, 'r', encoding='utf-8', errors='ignore') as f_in, \
+         open(fichier_csv, 'w', newline='', encoding='utf-8') as f_out:
+
+        champs = ['time','src_ip','src_port','dst_ip','dst_port','flags','seq','ack','win','length']
+        writer = csv.DictWriter(f_out, fieldnames=champs)
+        writer.writeheader()
+
+        for ligne in f_in:
+            data = parse_ligne_tcpdump(ligne)
+            if data:
+                writer.writerow(data)
+
+    return fichier_csv
+
+
+# ================== ANALYSE & GRAPHIQUES ===================
+
+def charger_csv(fichier_csv):
+    lignes = []
+    with open(fichier_csv, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            lignes.append(row)
+    return lignes
+
+
+def extraire_flags_principaux(flag_str: str):
+    flags = set()
+    s = flag_str.upper()
+
+    if 'S' in s and 'F' not in s and 'P' not in s and 'U' not in s and 'R' not in s and 'A' not in s:
+        flags.add('SYN')
+    if 'F' in s and 'P' not in s and 'U' not in s and 'S' not in s:
+        flags.add('FIN')
+    if 'R' in s:
+        flags.add('RST')
+    if 'P' in s:
+        flags.add('PSH')
+    if 'U' in s:
+        flags.add('URG')
+    if s.strip() in ('', '[]'):
+        flags.add('NULL')
+    if 'F' in s and 'P' in s and 'U' in s:
+        flags.add('XMAS')
+
+    return flags
+
+
+def compter_par_flags(lignes):
+    c = Counter()
+    for row in lignes:
+        for f in extraire_flags_principaux(row['flags']):
+            c[f] += 1
+    return c
+
+
+def compter_syn_par_service(lignes):
+    c = Counter()
+    for row in lignes:
+        flags = extraire_flags_principaux(row['flags'])
+        if 'SYN' in flags:
+            key = f"{row['dst_ip']}:{row['dst_port']}"
+            c[key] += 1
+    return c
+
+
+def compter_ports_par_src(lignes):
+    ports_par_src = defaultdict(set)
+    for row in lignes:
+        ports_par_src[row['src_ip']].add(row['dst_port'])
+    return {src: len(ports) for src, ports in ports_par_src.items()}
+
+
+def compter_traffic_par_ip(lignes):
+    src_count = Counter()
+    dst_count = Counter()
+    for row in lignes:
+        src_count[row['src_ip']] += 1
+        dst_count[row['dst_ip']] += 1
+    return src_count, dst_count
+
+
+# ---- TOP 5 SRC_IP QUI ENVOIENT LE PLUS DE SYN ----
+
+def est_syn_seul(flags: str) -> bool:
+    # S présent et A absent = SYN « pur »
+    f = flags.upper()
+    return 'S' in f and 'A' not in f
+
+
+def top5_src_ip_syn(lignes):
+    compteur = Counter()
+    for row in lignes:
+        if est_syn_seul(row['flags']):
+            compteur[row['src_ip']] += 1
+    return compteur.most_common(5)
+
+
+def plot_bar(counter_dict, titre, xlabel, ylabel, output_path, max_items=10):
+    if not counter_dict:
+        return
+    items = sorted(counter_dict.items(), key=lambda x: x[1], reverse=True)[:max_items]
+    labels = [k for k, _ in items]
+    values = [v for _, v in items]
+
+    plt.figure(figsize=(10, 5))
+    plt.bar(labels, values)
+    plt.xticks(rotation=45, ha='right', fontsize=8)
+    plt.title(titre)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def plot_pie(counter_dict, titre, output_path, min_pct=1.0):
+    if not counter_dict:
+        return
+
+    labels = []
+    sizes = []
+    total = sum(counter_dict.values())
+
+    for k, v in counter_dict.items():
+        pct = v * 100.0 / total
+        if pct >= min_pct:
+            labels.append(k)
+            sizes.append(v)
+
+    if not sizes:
+        return
+
+    plt.figure(figsize=(6, 6))
+    plt.pie(
+        sizes,
+        labels=labels,
+        autopct='%1.1f%%',
+        startangle=90
+    )
+    plt.title(titre)
+    plt.axis('equal')
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def generer_graphiques_et_html(fichier_csv):
+    lignes = charger_csv(fichier_csv)
+    if not lignes:
+        return None
+
+    dossier = os.path.dirname(fichier_csv)
+    base = os.path.splitext(os.path.basename(fichier_csv))[0]
+
+    images = []
+
+    # 1) Répartition des flags (barres)
+    flags_count = compter_par_flags(lignes)
+    img_flags = os.path.join(dossier, base + "_flags.png")
+    plot_bar(flags_count,
+             "Répartition des principaux flags TCP",
+             "Flags",
+             "Nombre de paquets",
+             img_flags)
+    images.append(("Répartition des flags TCP", os.path.basename(img_flags)))
+
+    # 1bis) Répartition des flags (camembert)
+    img_flags_pie = os.path.join(dossier, base + "_flags_pie.png")
+    plot_pie(flags_count,
+             "Répartition des principaux flags TCP (camembert)",
+             img_flags_pie)
+    images.append(("Répartition des flags TCP (camembert)", os.path.basename(img_flags_pie)))
+
+    # 2) TOP services (dst_ip:dst_port) avec beaucoup de SYN
+    syn_par_service = compter_syn_par_service(lignes)
+    img_syn = os.path.join(dossier, base + "_syn_services.png")
+    plot_bar(syn_par_service,
+             "Top services par nombre de SYN (potentiel SYN flood / DDoS)",
+             "dst_ip:dst_port",
+             "Nombre de SYN",
+             img_syn)
+    images.append(("Services ciblés (SYN)", os.path.basename(img_syn)))
+
+    # 3) TOP sources par nombre de ports distincts (port scan)
+    ports_par_src = compter_ports_par_src(lignes)
+    img_pscan = os.path.join(dossier, base + "_portscan.png")
+    plot_bar(ports_par_src,
+             "Top IP source par nombre de ports touchés (port scan)",
+             "src_ip",
+             "Nombre de ports distincts",
+             img_pscan)
+    images.append(("Sources possibles de port scan", os.path.basename(img_pscan)))
+
+    # 4) TOP IP source / destination par volume de paquets
+    src_count, dst_count = compter_traffic_par_ip(lignes)
+    img_src = os.path.join(dossier, base + "_top_src.png")
+    plot_bar(src_count,
+             "Top IP source par nombre de paquets",
+             "src_ip",
+             "Nombre de paquets",
+             img_src)
+    images.append(("Top IP source", os.path.basename(img_src)))
+
+    img_dst = os.path.join(dossier, base + "_top_dst.png")
+    plot_bar(dst_count,
+             "Top IP destination par nombre de paquets",
+             "dst_ip",
+             "Nombre de paquets",
+             img_dst)
+    images.append(("Top IP destination", os.path.basename(img_dst)))
+
+    # 5) GRAPHIQUE TOP 5 SRC_IP SYN SEULS
+    top5_syn = top5_src_ip_syn(lignes)
+    premier_ip_syn = None
+    if top5_syn:
+        d_top5 = {ip: nb for ip, nb in top5_syn}
+        img_top5_syn = os.path.join(dossier, base + "_top5_syn_src.png")
+        plot_bar(d_top5,
+                 "Top 5 IP source par nombre de SYN (SYN seuls)",
+                 "src_ip",
+                 "Nombre de SYN",
+                 img_top5_syn)
+        images.append(("Top 5 IP source (SYN seuls)", os.path.basename(img_top5_syn)))
+
+        # mémoriser la première IP du top 5
+        premier_ip_syn = top5_syn[0][0]
+
+    # 6) Si on a une première IP, faire ses graphes dédiés
+    if premier_ip_syn:
+        # a) Distribution de la longueur des paquets de cette IP (histogramme)
+        longueurs = []
+        flags_ip = []
+        for row in lignes:
+            if row['src_ip'] == premier_ip_syn:
+                try:
+                    longueurs.append(int(row['length']))
+                except ValueError:
+                    continue
+                flags_ip.append(row['flags'])
+
+        if longueurs:
+            img_len = os.path.join(dossier, base + f"_{premier_ip_syn}_lengths.png")
+            plt.figure(figsize=(10, 5))
+            plt.hist(longueurs, bins=20, edgecolor='black')
+            plt.title(f"Distribution de la longueur des paquets pour {premier_ip_syn}")
+            plt.xlabel("Longueur du paquet")
+            plt.ylabel("Nombre de paquets")
+            plt.tight_layout()
+            plt.savefig(img_len)
+            plt.close()
+            images.append((f"Longueur des paquets pour {premier_ip_syn}", os.path.basename(img_len)))
+
+        # b) Part des paquets SYN vs non-SYN pour cette IP (camembert)
+        syn_count = 0
+        non_syn_count = 0
+        for row in lignes:
+            if row['src_ip'] == premier_ip_syn:
+                if est_syn_seul(row['flags']):
+                    syn_count += 1
+                else:
+                    non_syn_count += 1
+
+        total_ip = syn_count + non_syn_count
+        if total_ip > 0:
+            syn_dict = {"SYN": syn_count, "Autres": non_syn_count}
+            img_syn_pie = os.path.join(dossier, base + f"_{premier_ip_syn}_syn_ratio.png")
+            plot_pie(syn_dict,
+                     f"Part des paquets SYN pour {premier_ip_syn}",
+                     img_syn_pie,
+                     min_pct=0.0)
+            images.append((f"Part des paquets SYN pour {premier_ip_syn}", os.path.basename(img_syn_pie)))
+
+    # Génération de la page HTML
+    fichier_html = os.path.join(dossier, base + "_rapport.html")
+    with open(fichier_html, "w", encoding="utf-8") as f:
+        f.write("<!DOCTYPE html>\n<html lang='fr'>\n<head>\n")
+        f.write("<meta charset='UTF-8'>\n")
+        f.write(f"<title>Rapport d'analyse : {base}</title>\n")
+        f.write("<style>body{font-family:Arial, sans-serif;} img{max-width:100%;}</style>\n")
+        f.write("</head>\n<body>\n")
+        f.write(f"<h1>Rapport d'analyse réseau : {base}</h1>\n")
+        f.write("<p>Ce rapport regroupe des graphiques pour aider à visualiser de potentielles attaques (SYN flood / DDoS, port scan, scans basés sur les flags TCP).</p>\n")
+
+        if premier_ip_syn:
+            f.write(f"<p>IP source la plus active en SYN : <b>{premier_ip_syn}</b></p>\n")
+
+        for titre, img_name in images:
+            f.write(f"<h2>{titre}</h2>\n")
+            f.write(f"<img src='{img_name}' alt='{titre}' />\n")
+
+        f.write("</body>\n</html>\n")
+
+    return fichier_html
+
+
+# ================== INTERFACE TKINTER ===================
+
+def choisir_fichier():
+    chemin_fichier = filedialog.askopenfilename(
+        title="Sélectionner un fichier tcpdump",
+        filetypes=[("Fichiers texte", "*.txt *.log"), ("Tous les fichiers", "*.*")]
+    )
+
+    if chemin_fichier:
+        label_chemin.config(text=f"Fichier sélectionné : {chemin_fichier}")
+        try:
+            csv_genere = tcpdump_to_csv(chemin_fichier)
+            rapport_html = generer_graphiques_et_html(csv_genere)
+            msg = f"CSV généré : {csv_genere}"
+            if rapport_html:
+                msg += f"\nRapport HTML : {rapport_html}"
+            messagebox.showinfo("Terminé", msg)
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Une erreur est survenue : {e}")
+    else:
+        label_chemin.config(text="Aucun fichier sélectionné")
+
+
+def quitter():
+    fenetre.destroy()
+
+
+fenetre = tk.Tk()
+fenetre.title("tcpdump ---> CSV + Rapport")
+fenetre.geometry("450x260")
+
+btn_choisir_fichier = tk.Button(fenetre, text="Choisir un fichier", command=choisir_fichier)
+btn_choisir_fichier.pack(pady=20)
+
+label_chemin = tk.Label(fenetre, text="Aucun fichier sélectionné", wraplength=420)
+label_chemin.pack(pady=20)
+
+btn_quitter = tk.Button(fenetre, text="Quitter", command=quitter)
+btn_quitter.pack(pady=20)
+
+fenetre.mainloop()

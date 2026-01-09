@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang='fr'>
+<head>
+<meta charset='UTF-8'>
+<title>Rapport d'analyse : trame_analyse</title>
+<style>body{font-family:Arial, sans-serif;} img{max-width:100%;}</style>
+</head>
+<body>
+<h1>Rapport d'analyse réseau : trame_analyse</h1>
+<p>Ce rapport regroupe des graphiques pour aider à visualiser de potentielles attaques (SYN flood / DDoS, port scan, scans basés sur les flags TCP).</p>
+<p>IP source la plus active en SYN : <b>190-0-175-100.gba.solunet.com.ar</b></p>
+<h2>Répartition des flags TCP</h2>
+<img src='trame_analyse_flags.png' alt='Répartition des flags TCP' />
+<h2>Répartition des flags TCP (camembert)</h2>
+<img src='trame_analyse_flags_pie.png' alt='Répartition des flags TCP (camembert)' />
+<h2>Services ciblés (SYN)</h2>
+<img src='trame_analyse_syn_services.png' alt='Services ciblés (SYN)' />
+<h2>Sources possibles de port scan</h2>
+<img src='trame_analyse_portscan.png' alt='Sources possibles de port scan' />
+<h2>Top IP source</h2>
+<img src='trame_analyse_top_src.png' alt='Top IP source' />
+<h2>Top IP destination</h2>
+<img src='trame_analyse_top_dst.png' alt='Top IP destination' />
+<h2>Top 5 IP source (SYN seuls)</h2>
+<img src='trame_analyse_top5_syn_src.png' alt='Top 5 IP source (SYN seuls)' />
+<h2>Longueur des paquets pour 190-0-175-100.gba.solunet.com.ar</h2>
+<img src='trame_analyse_190-0-175-100.gba.solunet.com.ar_lengths.png' alt='Longueur des paquets pour 190-0-175-100.gba.solunet.com.ar' />
+<h2>Part des paquets SYN pour 190-0-175-100.gba.solunet.com.ar</h2>
+<img src='trame_analyse_190-0-175-100.gba.solunet.com.ar_syn_ratio.png' alt='Part des paquets SYN pour 190-0-175-100.gba.solunet.com.ar' />
+</body>
+</html>

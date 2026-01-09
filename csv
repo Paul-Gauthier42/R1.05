@@ -1,0 +1,107 @@
+import re
+import csv
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+# ================== PARSING DES LIGNES TCPDUMP ===================
+
+REGEX_LIGNE_IP = re.compile(
+    r'^(?P<time>\d{2}:\d{2}:\d{2}\.\d+)\s+IP\s+'
+    r'(?P<src>[^ ]+)\s+>\s+(?P<dst>[^:]+):\s+'
+    r'Flags\s+\[(?P<flags>[^\]]+)\],\s+'
+    r'(?:seq\s+(?P<seq>[0-9:]+),\s+)?'
+    r'(?:ack\s+(?P<ack>\d+),\s+)?'
+    r'win\s+(?P<win>\d+).*?'
+    r'length\s+(?P<length>\d+)'
+)
+
+def split_ip_port(host_port: str):
+    if '.' not in host_port:
+        return host_port, ''
+    h, p = host_port.rsplit('.', 1)
+    return h, p
+
+def parse_ligne_tcpdump(ligne: str):
+    m = REGEX_LIGNE_IP.match(ligne.strip())
+    if not m:
+        return None
+
+    time = m.group('time')
+    src_raw = m.group('src')
+    dst_raw = m.group('dst')
+    flags = m.group('flags')
+    seq = m.group('seq') or ''
+    ack = m.group('ack') or ''
+    win = m.group('win')
+    length = m.group('length')
+
+    src_ip, src_port = split_ip_port(src_raw)
+    dst_ip, dst_port = split_ip_port(dst_raw)
+
+    return {
+        'time': time,
+        'src_ip': src_ip,
+        'src_port': src_port,
+        'dst_ip': dst_ip,
+        'dst_port': dst_port,
+        'flags': flags,
+        'seq': seq,
+        'ack': ack,
+        'win': win,
+        'length': length,
+    }
+
+def tcpdump_to_csv(fichier_tcpdump: str):
+    base, _ = os.path.splitext(fichier_tcpdump)
+    fichier_csv = base + "_analyse.csv"
+
+    with open(fichier_tcpdump, 'r', encoding='utf-8', errors='ignore') as f_in, \
+         open(fichier_csv, 'w', newline='', encoding='utf-8') as f_out:
+
+        champs = ['time','src_ip','src_port','dst_ip','dst_port','flags','seq','ack','win','length']
+        writer = csv.DictWriter(f_out, fieldnames=champs)
+        writer.writeheader()
+
+        for ligne in f_in:
+            data = parse_ligne_tcpdump(ligne)
+            if data:
+                writer.writerow(data)
+
+    return fichier_csv
+
+# ================== INTERFACE TKINTER ===================
+
+def choisir_fichier():
+    chemin_fichier = filedialog.askopenfilename(
+        title="Sélectionner un fichier tcpdump",
+        filetypes=[("Fichiers texte", "*.txt *.log"), ("Tous les fichiers", "*.*")]
+    )
+
+    if chemin_fichier:
+        label_chemin.config(text=f"Fichier sélectionné : {chemin_fichier}")
+        try:
+            csv_genere = tcpdump_to_csv(chemin_fichier)
+            messagebox.showinfo("Terminé", f"CSV généré : {csv_genere}")
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Une erreur est survenue : {e}")
+    else:
+        label_chemin.config(text="Aucun fichier sélectionné")
+
+def quitter():
+    fenetre.destroy()
+
+fenetre = tk.Tk()
+fenetre.title("tcpdump ---> CSV")
+fenetre.geometry("400x200")
+
+btn_choisir_fichier = tk.Button(fenetre, text="Choisir un fichier", command=choisir_fichier)
+btn_choisir_fichier.pack(pady=20)
+
+label_chemin = tk.Label(fenetre, text="Aucun fichier sélectionné", wraplength=380)
+label_chemin.pack(pady=20)
+
+btn_quitter = tk.Button(fenetre, text="Quitter", command=quitter)
+btn_quitter.pack(pady=20)
+
+fenetre.mainloop()
