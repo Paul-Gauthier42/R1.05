@@ -6,11 +6,11 @@ from tkinter import filedialog, messagebox
 from collections import Counter, defaultdict
 
 import matplotlib
-matplotlib.use("Agg")  # backend sans affichage
+matplotlib.use("Agg")  
 import matplotlib.pyplot as plt
 
 
-# ================== PARSING DES LIGNES TCPDUMP ===================
+# ================== annalyse des données ===================
 
 REGEX_LIGNE_IP = re.compile(
     r'^(?P<time>\d{2}:\d{2}:\d{2}\.\d+)\s+IP\s+'
@@ -21,9 +21,10 @@ REGEX_LIGNE_IP = re.compile(
     r'win\s+(?P<win>\d+).*?'
     r'length\s+(?P<length>\d+)'
 )
-
+"Décrit le format standard d'une ligne tcpdump contenant un paquet IP/TCP. Extrait les informations essentielles"
 
 def split_ip_port(host_port: str):
+    "Prend une chaîne au format 192.168.0.1.443 et la coupe au dernier point pour séparer"
     if '.' not in host_port:
         return host_port, ''
     h, p = host_port.rsplit('.', 1)
@@ -31,6 +32,7 @@ def split_ip_port(host_port: str):
 
 
 def parse_ligne_tcpdump(ligne: str):
+    "Applique l'expression regex sur une ligne brute. Si elle correspond au format attendu"
     m = REGEX_LIGNE_IP.match(ligne.strip())
     if not m:
         return None
@@ -62,6 +64,7 @@ def parse_ligne_tcpdump(ligne: str):
 
 
 def tcpdump_to_csv(fichier_tcpdump: str):
+    "Traite un fichier tcpdump ligne par ligne"
     base, _ = os.path.splitext(fichier_tcpdump)
     fichier_csv = base + "_analyse.csv"
 
@@ -83,6 +86,7 @@ def tcpdump_to_csv(fichier_tcpdump: str):
 # ================== ANALYSE & GRAPHIQUES ===================
 
 def charger_csv(fichier_csv):
+    "Lit le fichier CSV précédemment généré et retourne une liste complète de tous les paquets sous forme de dictionnaires."
     lignes = []
     with open(fichier_csv, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -92,6 +96,7 @@ def charger_csv(fichier_csv):
 
 
 def extraire_flags_principaux(flag_str: str):
+    "Pour chaque paquet, identifie son type de drapeau principal et accumule le nombre de paquets de chaque type. Résultat : distribution des types de drapeaux dans la capture."
     flags = set()
     s = flag_str.upper()
 
@@ -114,6 +119,7 @@ def extraire_flags_principaux(flag_str: str):
 
 
 def compter_par_flags(lignes):
+    "Filtre les paquets SYN et les groupe par service destination (adresse IP + port). Identifie quels services reçoivent le plus de SYN → détecte potentiels SYN flood ou DDoS ciblant des services spécifiques."
     c = Counter()
     for row in lignes:
         for f in extraire_flags_principaux(row['flags']):
@@ -122,6 +128,7 @@ def compter_par_flags(lignes):
 
 
 def compter_syn_par_service(lignes):
+    "Pour chaque adresse IP source, compte le nombre de ports destination différents contactés. Une IP qui touche beaucoup de ports suggère un scan de ports. Résultat : dictionnaire des IP source avec leur nombre de ports distincts."
     c = Counter()
     for row in lignes:
         flags = extraire_flags_principaux(row['flags'])
@@ -132,13 +139,16 @@ def compter_syn_par_service(lignes):
 
 
 def compter_ports_par_src(lignes):
+    " IP sources : compte combien de paquets viennent de chaque source IP destinations : compte combien de paquets arrivent à chaque destination Identifie les IP les plus actives dans les deux sens."
     ports_par_src = defaultdict(set)
     for row in lignes:
         ports_par_src[row['src_ip']].add(row['dst_port'])
     return {src: len(ports) for src, ports in ports_par_src.items()}
 
 
+
 def compter_traffic_par_ip(lignes):
+    "Teste si un drapeau contient SYN mais pas ACK. Caractérise une connexion nouvelle ou une attaque SYN flood (nombreux SYN sans ACK)."
     src_count = Counter()
     dst_count = Counter()
     for row in lignes:
@@ -147,14 +157,15 @@ def compter_traffic_par_ip(lignes):
     return src_count, dst_count
 
 
-# ---- TOP 5 SRC_IP QUI ENVOIENT LE PLUS DE SYN ----
 
 def est_syn_seul(flags: str) -> bool:
+    "Teste si un drapeau contient SYN mais pas ACK. Caractérise une connexion nouvelle ou une attaque SYN flood (nombreux SYN sans ACK)."
     f = flags.upper()
     return 'S' in f and 'A' not in f
 
 
 def top5_src_ip_syn(lignes):
+    "Identifie les 5 adresses IP source envoyant le plus de paquets SYN seuls. Cibles potentielles pour une enquête de sécurité."
     compteur = Counter()
     for row in lignes:
         if est_syn_seul(row['flags']):
@@ -163,6 +174,7 @@ def top5_src_ip_syn(lignes):
 
 
 def plot_bar(counter_dict, titre, xlabel, ylabel, output_path, max_items=10):
+    "Fonction générique pour créer des diagrammes en barres"
     if not counter_dict:
         return
     items = sorted(counter_dict.items(), key=lambda x: x[1], reverse=True)[:max_items]
@@ -181,6 +193,7 @@ def plot_bar(counter_dict, titre, xlabel, ylabel, output_path, max_items=10):
 
 
 def plot_pie(counter_dict, titre, output_path, min_pct=1.0):
+    "Fonction générique pour créer des diagrammes circulaires "
     if not counter_dict:
         return
 
