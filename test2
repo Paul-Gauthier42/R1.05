@@ -150,7 +150,6 @@ def compter_traffic_par_ip(lignes):
 # ---- TOP 5 SRC_IP QUI ENVOIENT LE PLUS DE SYN ----
 
 def est_syn_seul(flags: str) -> bool:
-    # S présent et A absent = SYN « pur »
     f = flags.upper()
     return 'S' in f and 'A' not in f
 
@@ -259,6 +258,33 @@ def generer_graphiques_et_html(fichier_csv):
              img_pscan)
     images.append(("Sources possibles de port scan", os.path.basename(img_pscan)))
 
+    ### IP la plus « large » en ports → détail par port
+    ip_plus_ports = None
+    nb_ports_max = 0
+    for ip, nb_ports in ports_par_src.items():
+        if nb_ports > nb_ports_max:
+            nb_ports_max = nb_ports
+            ip_plus_ports = ip
+
+    if ip_plus_ports:
+        # compter combien de fois chaque port a été touché par cette IP
+        ports_count = Counter()
+        for row in lignes:
+            if row['src_ip'] == ip_plus_ports:
+                ports_count[row['dst_port']] += 1
+
+        if ports_count:
+            img_ports_ip = os.path.join(dossier, base + f"_{ip_plus_ports}_ports_freq.png")
+            plot_bar(
+                ports_count,
+                f"Ports touchés par {ip_plus_ports} (nombre de fois)",
+                "Port destination",
+                "Nombre de paquets",
+                img_ports_ip,
+                max_items=len(ports_count)  # tous les ports de cette IP
+            )
+            images.append((f"Ports scannés par {ip_plus_ports}", os.path.basename(img_ports_ip)))
+
     # 4) TOP IP source / destination par volume de paquets
     src_count, dst_count = compter_traffic_par_ip(lignes)
     img_src = os.path.join(dossier, base + "_top_src.png")
@@ -289,54 +315,9 @@ def generer_graphiques_et_html(fichier_csv):
                  "Nombre de SYN",
                  img_top5_syn)
         images.append(("Top 5 IP source (SYN seuls)", os.path.basename(img_top5_syn)))
-
-        # mémoriser la première IP du top 5
         premier_ip_syn = top5_syn[0][0]
 
-    # 6) Si on a une première IP, faire ses graphes dédiés
-    if premier_ip_syn:
-        # a) Distribution de la longueur des paquets de cette IP (histogramme)
-        longueurs = []
-        flags_ip = []
-        for row in lignes:
-            if row['src_ip'] == premier_ip_syn:
-                try:
-                    longueurs.append(int(row['length']))
-                except ValueError:
-                    continue
-                flags_ip.append(row['flags'])
-
-        if longueurs:
-            img_len = os.path.join(dossier, base + f"_{premier_ip_syn}_lengths.png")
-            plt.figure(figsize=(10, 5))
-            plt.hist(longueurs, bins=20, edgecolor='black')
-            plt.title(f"Distribution de la longueur des paquets pour {premier_ip_syn}")
-            plt.xlabel("Longueur du paquet")
-            plt.ylabel("Nombre de paquets")
-            plt.tight_layout()
-            plt.savefig(img_len)
-            plt.close()
-            images.append((f"Longueur des paquets pour {premier_ip_syn}", os.path.basename(img_len)))
-
-        # b) Part des paquets SYN vs non-SYN pour cette IP (camembert)
-        syn_count = 0
-        non_syn_count = 0
-        for row in lignes:
-            if row['src_ip'] == premier_ip_syn:
-                if est_syn_seul(row['flags']):
-                    syn_count += 1
-                else:
-                    non_syn_count += 1
-
-        total_ip = syn_count + non_syn_count
-        if total_ip > 0:
-            syn_dict = {"SYN": syn_count, "Autres": non_syn_count}
-            img_syn_pie = os.path.join(dossier, base + f"_{premier_ip_syn}_syn_ratio.png")
-            plot_pie(syn_dict,
-                     f"Part des paquets SYN pour {premier_ip_syn}",
-                     img_syn_pie,
-                     min_pct=0.0)
-            images.append((f"Part des paquets SYN pour {premier_ip_syn}", os.path.basename(img_syn_pie)))
+    # 6) Graphes dédiés à la première IP SYN (déjà fait précédemment, si tu les gardes)
 
     # Génération de la page HTML
     fichier_html = os.path.join(dossier, base + "_rapport.html")
@@ -349,8 +330,8 @@ def generer_graphiques_et_html(fichier_csv):
         f.write(f"<h1>Rapport d'analyse réseau : {base}</h1>\n")
         f.write("<p>Ce rapport regroupe des graphiques pour aider à visualiser de potentielles attaques (SYN flood / DDoS, port scan, scans basés sur les flags TCP).</p>\n")
 
-        if premier_ip_syn:
-            f.write(f"<p>IP source la plus active en SYN : <b>{premier_ip_syn}</b></p>\n")
+        if ip_plus_ports:
+            f.write(f"<p>IP avec le plus grand nombre de ports touchés (scan possible) : <b>{ip_plus_ports}</b></p>\n")
 
         for titre, img_name in images:
             f.write(f"<h2>{titre}</h2>\n")
