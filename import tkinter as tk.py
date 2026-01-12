@@ -1,132 +1,467 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox
+import re
 import csv
 import os
-import re
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from collections import Counter, defaultdict
+
+import matplotlib
+matplotlib.use("Agg")  # backend sans affichage
+import matplotlib.pyplot as plt
 
 
 # ================== PARSING DES LIGNES TCPDUMP ===================
 
-regex_ligne_ip = re.compile(
+REGEX_LIGNE_IP = re.compile(
     r'^(?P<time>\d{2}:\d{2}:\d{2}\.\d+)\s+IP\s+'
     r'(?P<src>[^ ]+)\s+>\s+(?P<dst>[^:]+):\s+'
     r'Flags\s+\[(?P<flags>[^\]]+)\],\s+'
-    r'seq\s+(?P<seq>[0-9:]+),\s+'
-    r'ack\s+(?P<ack>\d+),\s+'
-    r'win\s+(?P<win>\d+),.*?'
+    r'(?:seq\s+(?P<seq>[0-9:]+),\s+)?'
+    r'(?:ack\s+(?P<ack>\d+),\s+)?'
+    r'win\s+(?P<win>\d+).*?'
     r'length\s+(?P<length>\d+)'
 )
+"Décrit le format standard d'une ligne tcpdump contenant un paquet IP/TCP. Extrait les informations essentielles"
+
+def split_ip_port(host_port: str):
+    "Prend une chaîne au format 192.168.0.1.443 et la coupe au dernier point pour séparer"
+    if '.' not in host_port:
+        return host_port, ''
+    h, p = host_port.rsplit('.', 1)
+    return h, p
 
 
-def split_ip_port(value: str):
-    if "." not in value:
-        return value, ""
-    host, port = value.rsplit(".", 1)
-    return host, port
-
-
-def parse_ligne_ip(ligne: str):
-    m = regex_ligne_ip.match(ligne.strip())
+def parse_ligne_tcpdump(ligne: str):
+    "Applique l'expression regex sur une ligne brute. Si elle correspond au format attendu"
+    m = REGEX_LIGNE_IP.match(ligne.strip())
     if not m:
         return None
 
-    d = m.groupdict()
-    champs_obligatoires = ["time", "src", "dst", "flags", "seq", "ack", "win", "length"]
-    if any(not d.get(c) for c in champs_obligatoires):
-        return None
+    time = m.group('time')
+    src_raw = m.group('src')
+    dst_raw = m.group('dst')
+    flags = m.group('flags')
+    seq = m.group('seq') or ''
+    ack = m.group('ack') or ''
+    win = m.group('win')
+    length = m.group('length')
 
-    src_ip, src_port = split_ip_port(d["src"])
-    dst_ip, dst_port = split_ip_port(d["dst"])
+    src_ip, src_port = split_ip_port(src_raw)
+    dst_ip, dst_port = split_ip_port(dst_raw)
 
     return {
-        "time": d["time"],
-        "src_ip": src_ip,
-        "src_port": src_port,
-        "dst_ip": dst_ip,
-        "dst_port": dst_port,
-        "flags": d["flags"],
-        "seq": d["seq"],
-        "ack": d["ack"],
-        "win": d["win"],
-        "length": d["length"],
+        'time': time,
+        'src_ip': src_ip,
+        'src_port': src_port,
+        'dst_ip': dst_ip,
+        'dst_port': dst_port,
+        'flags': flags,
+        'seq': seq,
+        'ack': ack,
+        'win': win,
+        'length': length,
     }
 
 
-def analyser_fichier_trame(chemin_entree: str, chemin_csv: str):
-    with open(chemin_entree, "r", encoding="utf-8") as f_in, \
-         open(chemin_csv, "w", newline="", encoding="utf-8") as f_out:
+def tcpdump_to_csv(fichier_tcpdump: str):
+    "Traite un fichier tcpdump ligne par ligne"
+    base, _ = os.path.splitext(fichier_tcpdump)
+    fichier_csv = base + "_analyse.csv"
 
-        writer = csv.writer(f_out, delimiter=",")
-        writer.writerow([
-            "time", "src_ip", "src_port",
-            "dst_ip", "dst_port",
-            "flags", "seq", "ack", "win",
-            "length"
-        ])
+    with open(fichier_tcpdump, 'r', encoding='utf-8', errors='ignore') as f_in, \
+            open(fichier_csv, 'w', newline='', encoding='utf-8') as f_out:
 
-        current = None
+        champs = ['time', 'src_ip', 'src_port', 'dst_ip', 'dst_port',
+                  'flags', 'seq', 'ack', 'win', 'length']
+        writer = csv.DictWriter(f_out, fieldnames=champs)
+        writer.writeheader()
 
         for ligne in f_in:
-            parsed = parse_ligne_ip(ligne)
-            if parsed:
-                if current is not None:
-                    writer.writerow([
-                        current["time"],
-                        current["src_ip"],
-                        current["src_port"],
-                        current["dst_ip"],
-                        current["dst_port"],
-                        current["flags"],
-                        current["seq"],
-                        current["ack"],
-                        current["win"],
-                        current["length"],
-                    ])
-                current = parsed
-            else:
-                # On ignore complètement les lignes hexdump ou autres
-                continue
+            data = parse_ligne_tcpdump(ligne)
+            if data:
+                writer.writerow(data)
 
-        if current is not None:
-            writer.writerow([
-                current["time"],
-                current["src_ip"],
-                current["src_port"],
-                current["dst_ip"],
-                current["dst_port"],
-                current["flags"],
-                current["seq"],
-                current["ack"],
-                current["win"],
-                current["length"],
-            ])
+    return fichier_csv
+
+
+# ================== ANALYSE & GRAPHIQUES ===================
+
+def charger_csv(fichier_csv):
+    "Lit le fichier CSV précédemment généré et retourne une liste complète de tous les paquets sous forme de dictionnaires."
+    lignes = []
+    with open(fichier_csv, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            lignes.append(row)
+    return lignes
+
+
+def extraire_flags_principaux(flag_str: str):
+    "Pour chaque paquet, identifie son type de drapeau principal et accumule le nombre de paquets de chaque type. Résultat : distribution des types de drapeaux dans la capture."
+    flags = set()
+    s = flag_str.upper()
+
+    if 'S' in s and 'F' not in s and 'P' not in s and 'U' not in s and 'R' not in s and 'A' not in s:
+        flags.add('SYN')
+    if 'F' in s and 'P' not in s and 'U' not in s and 'S' not in s:
+        flags.add('FIN')
+    if 'R' in s:
+        flags.add('RST')
+    if 'P' in s:
+        flags.add('PSH')
+    if 'U' in s:
+        flags.add('URG')
+    if s.strip() in ('', '[]'):
+        flags.add('NULL')
+    if 'F' in s and 'P' in s and 'U' in s:
+        flags.add('XMAS')
+
+    return flags
+
+
+def compter_par_flags(lignes):
+    "Filtre les paquets SYN et les groupe par service destination (adresse IP + port). Identifie quels services reçoivent le plus de SYN → détecte potentiels SYN flood ou DDoS ciblant des services spécifiques."
+    c = Counter()
+    for row in lignes:
+        for f in extraire_flags_principaux(row['flags']):
+            c[f] += 1
+    return c
+
+
+def compter_syn_par_service(lignes):
+    "Pour chaque adresse IP source, compte le nombre de ports destination différents contactés. Une IP qui touche beaucoup de ports suggère un scan de ports. Résultat : dictionnaire des IP source avec leur nombre de ports distincts."
+    c = Counter()
+    for row in lignes:
+        flags = extraire_flags_principaux(row['flags'])
+        if 'SYN' in flags:
+            key = f"{row['dst_ip']}:{row['dst_port']}"
+            c[key] += 1
+    return c
+
+
+def compter_ports_par_src(lignes):
+    " IP sources : compte combien de paquets viennent de chaque source IP destinations : compte combien de paquets arrivent à chaque destination Identifie les IP les plus actives dans les deux sens."
+    ports_par_src = defaultdict(set)
+    for row in lignes:
+        ports_par_src[row['src_ip']].add(row['dst_port'])
+    return {src: len(ports) for src, ports in ports_par_src.items()}
+
+
+def compter_traffic_par_ip(lignes):
+    "Teste si un drapeau contient SYN mais pas ACK. Caractérise une connexion nouvelle ou une attaque SYN flood (nombreux SYN sans ACK)."
+    src_count = Counter()
+    dst_count = Counter()
+    for row in lignes:
+        src_count[row['src_ip']] += 1
+        dst_count[row['dst_ip']] += 1
+    return src_count, dst_count
+
+
+# ---- TOP 5 SRC_IP QUI ENVOIENT LE PLUS DE SYN ----
+
+def est_syn_seul(flags: str) -> bool:
+    "Teste si un drapeau contient SYN mais pas ACK. Caractérise une connexion nouvelle ou une attaque SYN flood (nombreux SYN sans ACK)."
+    f = flags.upper()
+    return 'S' in f and 'A' not in f
+
+
+def top5_src_ip_syn(lignes):
+    "Identifie les 5 adresses IP source envoyant le plus de paquets SYN seuls. Cibles potentielles pour une enquête de sécurité."
+    compteur = Counter()
+    for row in lignes:
+        if est_syn_seul(row['flags']):
+            compteur[row['src_ip']] += 1
+    return compteur.most_common(5)
+
+
+def plot_bar(counter_dict, titre, xlabel, ylabel, output_path, max_items=10):
+    "Fonction générique pour créer des diagrammes en barres"
+    if not counter_dict:
+        return
+    items = sorted(counter_dict.items(), key=lambda x: x[1], reverse=True)[:max_items]
+    labels = [k for k, _ in items]
+    values = [v for _, v in items]
+
+    plt.figure(figsize=(10, 5))
+    plt.bar(labels, values)
+    plt.xticks(rotation=45, ha='right', fontsize=8)
+    plt.title(titre)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def plot_pie(counter_dict, titre, output_path, min_pct=1.0):
+    "Fonction générique pour créer des diagrammes circulaires "
+    if not counter_dict:
+        return
+
+    labels = []
+    sizes = []
+    total = sum(counter_dict.values())
+
+    for k, v in counter_dict.items():
+        pct = v * 100.0 / total
+        if pct >= min_pct:
+            labels.append(k)
+            sizes.append(v)
+
+    if not sizes:
+        return
+
+    plt.figure(figsize=(6, 6))
+    plt.pie(
+        sizes,
+        labels=labels,
+        autopct='%1.1f%%',
+        startangle=90
+    )
+    plt.title(titre)
+    plt.axis('equal')
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def generer_graphiques_et_rapports(fichier_csv):
+    lignes = charger_csv(fichier_csv)
+    if not lignes:
+        # CSV vide : pas de rapports
+        return None, None
+
+    dossier = os.path.dirname(fichier_csv)
+    base = os.path.splitext(os.path.basename(fichier_csv))[0]
+
+    images = []
+
+    # 1) Répartition des flags (barres)
+    flags_count = compter_par_flags(lignes)
+    img_flags = os.path.join(dossier, base + "_flags.png")
+    plot_bar(flags_count,
+             "Répartition des principaux flags TCP",
+             "Flags",
+             "Nombre de paquets",
+             img_flags)
+    images.append(("Répartition des flags TCP", os.path.basename(img_flags)))
+
+    # 1bis) Répartition des flags (camembert)
+    img_flags_pie = os.path.join(dossier, base + "_flags_pie.png")
+    plot_pie(flags_count,
+             "Répartition des principaux flags TCP (camembert)",
+             img_flags_pie)
+    images.append(("Répartition des flags TCP (camembert)", os.path.basename(img_flags_pie)))
+
+    # 2) TOP services (dst_ip:dst_port) avec beaucoup de SYN
+    syn_par_service = compter_syn_par_service(lignes)
+    img_syn = os.path.join(dossier, base + "_syn_services.png")
+    plot_bar(syn_par_service,
+             "Top services par nombre de SYN (potentiel SYN flood / DDoS)",
+             "dst_ip:dst_port",
+             "Nombre de SYN",
+             img_syn)
+    images.append(("Services ciblés (SYN)", os.path.basename(img_syn)))
+
+    # 3) TOP sources par nombre de ports distincts (port scan)
+    ports_par_src = compter_ports_par_src(lignes)
+    img_pscan = os.path.join(dossier, base + "_portscan.png")
+    plot_bar(ports_par_src,
+             "Top IP source par nombre de ports touchés (port scan)",
+             "src_ip",
+             "Nombre de ports distincts",
+             img_pscan)
+    images.append(("Sources possibles de port scan", os.path.basename(img_pscan)))
+
+    # IP la plus « large » en ports → détail par port
+    ip_plus_ports = None
+    nb_ports_max = 0
+    for ip, nb_ports in ports_par_src.items():
+        if nb_ports > nb_ports_max:
+            nb_ports_max = nb_ports
+            ip_plus_ports = ip
+
+    if ip_plus_ports:
+        ports_count = Counter()
+        for row in lignes:
+            if row['src_ip'] == ip_plus_ports:
+                ports_count[row['dst_port']] += 1
+
+        if ports_count:
+            img_ports_ip = os.path.join(dossier, base + f"_{ip_plus_ports}_ports_freq.png")
+            plot_bar(
+                ports_count,
+                f"Ports touchés par {ip_plus_ports} (nombre de fois)",
+                "Port destination",
+                "Nombre de paquets",
+                img_ports_ip,
+                max_items=len(ports_count)
+            )
+            images.append((f"Ports scannés par {ip_plus_ports}", os.path.basename(img_ports_ip)))
+
+    # 4) TOP IP source / destination par volume de paquets
+    src_count, dst_count = compter_traffic_par_ip(lignes)
+    img_src = os.path.join(dossier, base + "_top_src.png")
+    plot_bar(src_count,
+             "Top IP source par nombre de paquets",
+             "src_ip",
+             "Nombre de paquets",
+             img_src)
+    images.append(("Top IP source", os.path.basename(img_src)))
+
+    img_dst = os.path.join(dossier, base + "_top_dst.png")
+    plot_bar(dst_count,
+             "Top IP destination par nombre de paquets",
+             "dst_ip",
+             "Nombre de paquets",
+             img_dst)
+    images.append(("Top IP destination", os.path.basename(img_dst)))
+
+    # 5) GRAPHIQUE TOP 5 SRC_IP SYN SEULS (EN GRAPHIQUE)
+    top5_syn_list = top5_src_ip_syn(lignes)
+    if top5_syn_list:
+        d_top5 = {ip: nb for ip, nb in top5_syn_list}
+        img_top5_syn = os.path.join(dossier, base + "_top5_syn_src.png")
+        plot_bar(
+            d_top5,
+            "Top 5 IP source par nombre de SYN (SYN seuls)",
+            "src_ip",
+            "Nombre de SYN",
+            img_top5_syn
+        )
+        images.append(("Top 5 IP source (SYN seuls)", os.path.basename(img_top5_syn)))
+
+    # ===== Génération HTML =====
+    fichier_html = os.path.join(dossier, base + "_rapport.html")
+    with open(fichier_html, "w", encoding="utf-8") as f:
+        f.write("<!DOCTYPE html>\n<html lang='fr'>\n<head>\n")
+        f.write("<meta charset='UTF-8'>\n")
+        f.write(f"<title>Rapport d'analyse : {base}</title>\n")
+        f.write("<style>body{font-family:Arial, sans-serif;} img{max-width:100%;}</style>\n")
+        f.write("</head>\n<body>\n")
+        f.write(f"<h1>Rapport d'analyse réseau : {base}</h1>\n")
+        f.write("<p>Ce rapport regroupe des graphiques pour aider à visualiser de potentielles attaques "
+                "(SYN flood / DDoS, port scan, scans basés sur les flags TCP).</p>\n")
+
+        if ip_plus_ports:
+            f.write(f"<p>IP avec le plus grand nombre de ports touchés (scan possible) : "
+                    f"<b>{ip_plus_ports}</b> ({nb_ports_max} ports distincts)</p>\n")
+
+        for titre, img_name in images:
+            f.write(f"<h2>{titre}</h2>\n")
+            f.write(f"<img src='{img_name}' alt='{titre}' />\n")
+
+        f.write("</body>\n</html>\n")
+
+    # ===== Génération Markdown (texte uniquement) =====
+    fichier_md = os.path.join(dossier, base + "_rapport.md")
+    with open(fichier_md, "w", encoding="utf-8") as f:
+        f.write(f"# Rapport d'analyse réseau : {base}\n\n")
+        f.write("Ce rapport regroupe des informations utiles pour détecter "
+                "de potentielles attaques (SYN flood / DDoS, port scan, "
+                "scans basés sur les flags TCP).\n\n")
+
+        if ip_plus_ports:
+            f.write("## IP avec le plus grand nombre de ports touchés\n\n")
+            f.write(f"- IP suspecte (port scan possible) : **{ip_plus_ports}**\n")
+            f.write(f"- Nombre de ports distincts touchés : **{nb_ports_max}**\n\n")
+
+        f.write("## Répartition des principaux flags TCP\n\n")
+        if flags_count:
+            f.write("| Flag | Nombre de paquets |\n")
+            f.write("|------|-------------------|\n")
+            for flag, nb in flags_count.most_common():
+                f.write(f"| {flag} | {nb} |\n")
+            f.write("\n")
+        else:
+            f.write("Aucun paquet trouvé pour les flags TCP.\n\n")
+
+        f.write("## Top services par nombre de SYN (potentiel SYN flood / DDoS)\n\n")
+        if syn_par_service:
+            f.write("| Service (dst_ip:port) | Nombre de SYN |\n")
+            f.write("|------------------------|---------------|\n")
+            for service, nb in syn_par_service.most_common(10):
+                f.write(f"| {service} | {nb} |\n")
+            f.write("\n")
+        else:
+            f.write("Aucun SYN détecté vers des services spécifiques.\n\n")
+
+        f.write("## Top IP source par nombre de ports distincts touchés (port scan)\n\n")
+        if ports_par_src:
+            f.write("| IP source | Nombre de ports distincts |\n")
+            f.write("|-----------|---------------------------|\n")
+            for ip, nb in sorted(ports_par_src.items(),
+                                 key=lambda x: x[1], reverse=True)[:10]:
+                f.write(f"| {ip} | {nb} |\n")
+            f.write("\n")
+        else:
+            f.write("Aucune activité de scan de ports détectée.\n\n")
+
+        f.write("## Top IP source par nombre de paquets\n\n")
+        if src_count:
+            f.write("| IP source | Nombre de paquets |\n")
+            f.write("|-----------|-------------------|\n")
+            for ip, nb in src_count.most_common(10):
+                f.write(f"| {ip} | {nb} |\n")
+            f.write("\n")
+        else:
+            f.write("Aucun paquet source détecté.\n\n")
+
+        f.write("## Top IP destination par nombre de paquets\n\n")
+        if dst_count:
+            f.write("| IP destination | Nombre de paquets |\n")
+            f.write("|----------------|-------------------|\n")
+            for ip, nb in dst_count.most_common(10):
+                f.write(f"| {ip} | {nb} |\n")
+            f.write("\n")
+        else:
+            f.write("Aucun paquet destination détecté.\n\n")
+
+        f.write("## Top 5 IP source par nombre de SYN (SYN seuls)\n\n")
+        if top5_syn_list:
+            f.write("| IP source | Nombre de SYN |\n")
+            f.write("|-----------|---------------|\n")
+            for ip, nb in top5_syn_list:
+                f.write(f"| {ip} | {nb} |\n")
+            f.write("\n")
+            f.write(f"IP la plus active en SYN seuls : **{top5_syn_list[0][0]}** "
+                    f"avec **{top5_syn_list[0][1]}** paquets.\n\n")
+        else:
+            f.write("Aucune IP envoyant des SYN seuls de manière significative.\n\n")
+
+    return fichier_html, fichier_md
 
 
 # ================== INTERFACE TKINTER ===================
 
 def choisir_fichier():
     chemin_fichier = filedialog.askopenfilename(
-        title="Sélectionner un fichier de trames",
-        filetypes=[("Fichiers texte", "*.txt *.log *.out"), ("Tous les fichiers", "*.*")]
+        title="Sélectionner un fichier tcpdump",
+        filetypes=[("Fichiers texte", "*.txt *.log"), ("Tous les fichiers", "*.*")]
     )
+
     if chemin_fichier:
         label_chemin.config(text=f"Fichier sélectionné : {chemin_fichier}")
         try:
-            dossier, nom = os.path.split(chemin_fichier)
-            nom_sans_ext, _ = os.path.splitext(nom)
-            chemin_csv = os.path.join(dossier, nom_sans_ext + "_analyse.csv")
+            csv_genere = tcpdump_to_csv(chemin_fichier)
+            rapport_html, rapport_md = generer_graphiques_et_rapports(csv_genere)
 
-            analyser_fichier_trame(chemin_fichier, chemin_csv)
+            msg = f"CSV généré : {csv_genere}"
 
-            messagebox.showinfo(
-                "Terminé",
-                f"Fichier CSV créé :\n{chemin_csv}"
-            )
+            if rapport_html:
+                msg += f"\nRapport HTML : {rapport_html}"
+            else:
+                msg += "\nAucun rapport HTML généré (CSV vide ?)"
+
+            if rapport_md:
+                msg += f"\nRapport Markdown : {rapport_md}"
+            else:
+                msg += "\nAucun rapport Markdown généré (CSV vide ?)"
+
+            messagebox.showinfo("Terminé", msg)
+
         except Exception as e:
-            messagebox.showerror(
-                "Erreur",
-                f"Problème lors de la conversion : {e}"
-            )
+            messagebox.showerror("Erreur", f"Une erreur est survenue : {e}")
     else:
         label_chemin.config(text="Aucun fichier sélectionné")
 
@@ -136,13 +471,13 @@ def quitter():
 
 
 fenetre = tk.Tk()
-fenetre.title("Analyse de trames -> CSV")
-fenetre.geometry("500x220")
+fenetre.title("tcpdump ---> CSV + Rapport")
+fenetre.geometry("450x260")
 
 btn_choisir_fichier = tk.Button(fenetre, text="Choisir un fichier", command=choisir_fichier)
 btn_choisir_fichier.pack(pady=20)
 
-label_chemin = tk.Label(fenetre, text="Aucun fichier sélectionné", wraplength=460)
+label_chemin = tk.Label(fenetre, text="Aucun fichier sélectionné", wraplength=420)
 label_chemin.pack(pady=20)
 
 btn_quitter = tk.Button(fenetre, text="Quitter", command=quitter)
