@@ -1,12 +1,12 @@
-import re
-import csv
-import os
-import tkinter as tk
+import re              # Expressions régulières pour parser les lignes tcpdump
+import csv             # Lecture / écriture de fichiers CSV
+import os              # Gestion des chemins de fichiers
+import tkinter as tk   # Interface graphique Tkinter
 from tkinter import filedialog, messagebox
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict  # Outils de comptage/statistiques
 
 import matplotlib
-matplotlib.use("Agg")  # backend sans affichage
+matplotlib.use("Agg")  # Utilisation d'un backend sans affichage (génère des PNG sans ouvrir de fenêtre)
 import matplotlib.pyplot as plt
 
 
@@ -141,10 +141,10 @@ def compter_syn_par_service(lignes):
 
 def compter_ports_par_src(lignes):
     " IP sources : compte combien de paquets viennent de chaque source IP destinations : compte combien de paquets arrivent à chaque destination Identifie les IP les plus actives dans les deux sens."
-    ports_par_src = defaultdict(set)
+    ports_par_src = Counter()
     for row in lignes:
-        ports_par_src[row['src_ip']].add(row['dst_port'])
-    return {src: len(ports) for src, ports in ports_par_src.items()}
+        ports_par_src[row['src_ip']] += 1
+    return ports_par_src
 
 
 def compter_traffic_par_ip(lignes):
@@ -156,8 +156,6 @@ def compter_traffic_par_ip(lignes):
         dst_count[row['dst_ip']] += 1
     return src_count, dst_count
 
-
-# ---- TOP 5 SRC_IP QUI ENVOIENT LE PLUS DE SYN ----
 
 def est_syn_seul(flags: str) -> bool:
     "Teste si un drapeau contient SYN mais pas ACK. Caractérise une connexion nouvelle ou une attaque SYN flood (nombreux SYN sans ACK)."
@@ -172,6 +170,18 @@ def top5_src_ip_syn(lignes):
         if est_syn_seul(row['flags']):
             compteur[row['src_ip']] += 1
     return compteur.most_common(5)
+
+
+def compter_paquets_par_temps(lignes):
+    # Agrégation par seconde : "HH:MM:SS.mmm" -> "HH:MM:SS"
+    compteur = Counter()
+    for row in lignes:
+        t = row['time'].split('.')[0]
+        compteur[t] += 1
+    temps_tries = sorted(compteur.items(), key=lambda x: x[0])
+    x = [t for t, _ in temps_tries]
+    y = [n for _, n in temps_tries]
+    return x, y
 
 
 def plot_bar(counter_dict, titre, xlabel, ylabel, output_path, max_items=10):
@@ -225,10 +235,24 @@ def plot_pie(counter_dict, titre, output_path, min_pct=1.0):
     plt.close()
 
 
+def plot_line(x, y, titre, xlabel, ylabel, output_path):
+    "Fonction générique pour créer des courbe "
+    if not x or not y:
+        return
+    plt.figure(figsize=(10, 5))
+    plt.plot(x, y, marker='o')
+    plt.xticks(rotation=45, ha='right', fontsize=8)
+    plt.title(titre)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
 def generer_graphiques_et_rapports(fichier_csv):
     lignes = charger_csv(fichier_csv)
     if not lignes:
-        # CSV vide : pas de rapports
         return None, None
 
     dossier = os.path.dirname(fichier_csv)
@@ -263,17 +287,17 @@ def generer_graphiques_et_rapports(fichier_csv):
              img_syn)
     images.append(("Services ciblés (SYN)", os.path.basename(img_syn)))
 
-    # 3) TOP sources par nombre de ports distincts (port scan)
+    # 3) TOP sources par nombre total de ports touchés (port scan)
     ports_par_src = compter_ports_par_src(lignes)
     img_pscan = os.path.join(dossier, base + "_portscan.png")
     plot_bar(ports_par_src,
-             "Top IP source par nombre de ports touchés (port scan)",
+             "Top IP source par nombre total de ports ciblés (port scan)",
              "src_ip",
-             "Nombre de ports distincts",
+             "Nombre total de ports (avec répétition)",
              img_pscan)
-    images.append(("Sources possibles de port scan", os.path.basename(img_pscan)))
+    images.append(("Sources possibles de port scan (total de ports)", os.path.basename(img_pscan)))
 
-    # IP la plus « large » en ports → détail par port
+    # IP la plus « large » en ports
     ip_plus_ports = None
     nb_ports_max = 0
     for ip, nb_ports in ports_par_src.items():
@@ -317,7 +341,7 @@ def generer_graphiques_et_rapports(fichier_csv):
              img_dst)
     images.append(("Top IP destination", os.path.basename(img_dst)))
 
-    # 5) GRAPHIQUE TOP 5 SRC_IP SYN SEULS (EN GRAPHIQUE)
+    # 5) GRAPHIQUE TOP 5 SRC_IP SYN SEULS
     top5_syn_list = top5_src_ip_syn(lignes)
     if top5_syn_list:
         d_top5 = {ip: nb for ip, nb in top5_syn_list}
@@ -330,6 +354,19 @@ def generer_graphiques_et_rapports(fichier_csv):
             img_top5_syn
         )
         images.append(("Top 5 IP source (SYN seuls)", os.path.basename(img_top5_syn)))
+
+    # 6) Courbe temps / nombre de paquets (agrégé à la seconde)
+    x_time, y_count = compter_paquets_par_temps(lignes)
+    img_time = os.path.join(dossier, base + "_time_series.png")
+    plot_line(
+        x_time,
+        y_count,
+        "Évolution du nombre de paquets dans le temps",
+        "Temps (HH:MM:SS)",
+        "Nombre de paquets",
+        img_time
+    )
+    images.append(("Nombre de paquets dans le temps", os.path.basename(img_time)))
 
     # ===== Génération HTML =====
     fichier_html = os.path.join(dossier, base + "_rapport.html")
@@ -345,7 +382,7 @@ def generer_graphiques_et_rapports(fichier_csv):
 
         if ip_plus_ports:
             f.write(f"<p>IP avec le plus grand nombre de ports touchés (scan possible) : "
-                    f"<b>{ip_plus_ports}</b> ({nb_ports_max} ports distincts)</p>\n")
+                    f"<b>{ip_plus_ports}</b> ({nb_ports_max} ports au total)</p>\n")
 
         for titre, img_name in images:
             f.write(f"<h2>{titre}</h2>\n")
@@ -364,7 +401,7 @@ def generer_graphiques_et_rapports(fichier_csv):
         if ip_plus_ports:
             f.write("## IP avec le plus grand nombre de ports touchés\n\n")
             f.write(f"- IP suspecte (port scan possible) : **{ip_plus_ports}**\n")
-            f.write(f"- Nombre de ports distincts touchés : **{nb_ports_max}**\n\n")
+            f.write(f"- Nombre total de ports touchés (paquets) : **{nb_ports_max}**\n\n")
 
         f.write("## Répartition des principaux flags TCP\n\n")
         if flags_count:
@@ -386,10 +423,10 @@ def generer_graphiques_et_rapports(fichier_csv):
         else:
             f.write("Aucun SYN détecté vers des services spécifiques.\n\n")
 
-        f.write("## Top IP source par nombre de ports distincts touchés (port scan)\n\n")
+        f.write("## Top IP source par nombre total de ports touchés (port scan)\n\n")
         if ports_par_src:
-            f.write("| IP source | Nombre de ports distincts |\n")
-            f.write("|-----------|---------------------------|\n")
+            f.write("| IP source | Nombre total de ports (paquets) |\n")
+            f.write("|-----------|----------------------------------|\n")
             for ip, nb in sorted(ports_par_src.items(),
                                  key=lambda x: x[1], reverse=True)[:10]:
                 f.write(f"| {ip} | {nb} |\n")
@@ -428,6 +465,10 @@ def generer_graphiques_et_rapports(fichier_csv):
                     f"avec **{top5_syn_list[0][1]}** paquets.\n\n")
         else:
             f.write("Aucune IP envoyant des SYN seuls de manière significative.\n\n")
+
+        f.write("## Évolution du nombre de paquets dans le temps\n\n")
+        f.write("Un graphique en courbe est disponible dans le rapport HTML pour visualiser "
+                "le nombre de paquets par seconde.\n\n")
 
     return fichier_html, fichier_md
 
